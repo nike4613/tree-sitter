@@ -602,6 +602,10 @@ pub fn generate_node_types_json(
                     continue;
                 }
 
+                let existing_subtypes_opt = node_types_json
+                    .get(&variable.name)
+                    .and_then(|n| n.subtypes.clone());
+
                 // There may already be an entry with this name, because multiple
                 // rules may be aliased with the same name.
                 let mut node_type_existed = true;
@@ -617,6 +621,15 @@ pub fn generate_node_types_json(
                         subtypes: None,
                     }
                 });
+
+                // If this is an alias to a supertype that was already processed,
+                // copy the subtypes information
+                if syntax_grammar.supertype_symbols.contains(&symbol) {
+                    if let Some(subtypes) = existing_subtypes_opt {
+                        node_type_json.subtypes = Some(subtypes);
+                    }
+                    continue;
+                }
 
                 let fields_json = node_type_json.fields.as_mut().unwrap();
                 for (new_field, field_info) in &info.fields {
@@ -659,14 +672,30 @@ pub fn generate_node_types_json(
                 // This alias doesn't correspond to any existing type, so we need to create one
                 let is_extra = extra_names.contains(&alias.value);
 
+                // Check if this is a supertype
+                let is_supertype = symbol.is_non_terminal()
+                    && syntax_grammar.supertype_symbols.contains(symbol)
+                    && symbol.index < variable_info.len();
+
                 // Check if this is a non-terminal with structure we should preserve
                 let is_non_terminal_with_structure = symbol.is_non_terminal()
                     && !syntax_grammar.supertype_symbols.contains(symbol)
                     && !syntax_grammar.variables_to_inline.contains(symbol)
                     && symbol.index < variable_info.len();
 
-                // Determine if we should create fields/children based on the symbol type
-                let (fields, children) = if is_non_terminal_with_structure {
+                // Determine if we should create fields/children/subtypes based on the symbol type
+                let (fields, children, subtypes) = if is_supertype {
+                    let info = &variable_info[symbol.index];
+                    let mut subtypes = info
+                        .children
+                        .types
+                        .iter()
+                        .map(child_type_to_node_type)
+                        .collect::<Vec<_>>();
+                    subtypes.sort_unstable();
+                    subtypes.dedup();
+                    (None, None, Some(subtypes))
+                } else if is_non_terminal_with_structure {
                     let info = &variable_info[symbol.index];
                     // Create empty fields map and children info that will be populated
                     let fields = Some(BTreeMap::new());
@@ -675,9 +704,9 @@ pub fn generate_node_types_json(
                     } else {
                         Some(FieldInfoJSON::default())
                     };
-                    (fields, children)
+                    (fields, children, None)
                 } else {
-                    (None, None)
+                    (None, None, None)
                 };
 
                 node_types_json.insert(
@@ -689,11 +718,23 @@ pub fn generate_node_types_json(
                         extra: is_extra,
                         fields,
                         children,
-                        subtypes: None,
+                        subtypes,
                     },
                 );
 
+                // If this is a supertype, add it to the subtype_map
+                if is_supertype {
+                    if let Some(subtypes) = &node_types_json.get(&alias.value).unwrap().subtypes {
+                        let supertype = NodeTypeJSON {
+                            kind: alias.value.clone(),
+                            named: alias.is_named,
+                        };
+                        subtype_map.push((supertype, subtypes.clone()));
+                    }
+                }
+
                 // If this alias corresponds to a non-terminal with field/children info, populate it
+                // (but not for supertypes, which only have subtypes)
                 if is_non_terminal_with_structure {
                     let info = &variable_info[symbol.index];
                     let node_type_json = node_types_json.get_mut(&alias.value).unwrap();
